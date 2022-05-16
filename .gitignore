@@ -7,4 +7,6 @@ target/
 /jpi/
 /Dockerfile-jenkins-ext-oauth
 /sa/
-PR-Testing/jpi/
+PR-Testing/
+.factorypath
+/.vscode

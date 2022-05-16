@@ -54,6 +54,8 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Base64.Encoder;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -67,6 +69,7 @@ import javax.servlet.ServletException;
 
 import org.acegisecurity.Authentication;
 import org.acegisecurity.GrantedAuthority;
+import org.acegisecurity.GrantedAuthorityImpl;
 import org.acegisecurity.context.SecurityContextHolder;
 import org.acegisecurity.providers.UsernamePasswordAuthenticationToken;
 import org.kohsuke.stapler.DataBoundConstructor;
@@ -77,6 +80,7 @@ import org.kohsuke.stapler.QueryParameter;
 import org.kohsuke.stapler.Stapler;
 import org.kohsuke.stapler.StaplerRequest;
 import org.kohsuke.stapler.StaplerResponse;
+import org.springframework.dao.DataAccessException;
 
 import com.cloudbees.plugins.credentials.CredentialsProvider;
 import com.google.api.client.auth.oauth2.AuthorizationCodeFlow;
@@ -92,7 +96,8 @@ import com.google.api.client.http.HttpRequestFactory;
 import com.google.api.client.http.HttpTransport;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.util.SecurityUtils;
-
+import org.acegisecurity.userdetails.UserDetails;
+import org.acegisecurity.userdetails.UsernameNotFoundException;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import hudson.EnvVars;
 import hudson.Extension;
@@ -106,6 +111,7 @@ import hudson.model.User;
 import hudson.model.View;
 import hudson.scm.SCM;
 import hudson.security.GlobalMatrixAuthorizationStrategy;
+import hudson.security.GroupDetails;
 import hudson.security.Permission;
 import hudson.security.PermissionGroup;
 import hudson.security.ProjectMatrixAuthorizationStrategy;
@@ -148,6 +154,8 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
     private static final String LOGGED_OUT = "/plugin/openshift-login/loggedOut.html";
 
     private static final String USER_URI = "/apis/user.openshift.io/v1/users/~";
+    private static final String GROUPS_URI = "/apis/user.openshift.io/v1/groups";
+
     private static final String SAR_URI = "/apis/authorization.openshift.io/v1/subjectaccessreviews";
     private static final String CONFIG_MAP_URI = "/api/v1/namespaces/%s/configmaps/openshift-jenkins-login-plugin-config";
     private static final String OAUTH_PROVIDER_URI = "/.well-known/oauth-authorization-server";
@@ -409,6 +417,12 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
             } else {
                 runningInOpenShiftPodWithRequiredOAuthFeatures = false;
             }
+            // ELOS test groups call entry
+            //
+            String groups = setOpenShiftGroups(credential, transport);
+
+            if (LOGGER.isLoggable(INFO))
+                LOGGER.info("RBO-304: Test mesg - groups loaded:  " + groups);
         } catch (Throwable t) {
             runningInOpenShiftPodWithRequiredOAuthFeatures = false;
             LOGGER.log(Level.FINE, "populateDefaults", t);
@@ -660,6 +674,222 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
         OpenShiftUserInfo info = request.execute().parseAs(OpenShiftUserInfo.class);
         return info;
     }
+    // ELOS
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException, DataAccessException {
+        String usr;
+        OpenShiftUserInfo usrInfo = null;
+
+        // if (!username.endsWith("-view"))
+        //     throw new UsernameNotFoundException("Given principal name is a group, not an user.");
+        // else {
+            // user is OCP user with plugin suffix
+            // int idx = username.indexOf("-");
+            // usr = username.substring(0, idx);
+            usr = username;
+            // TODO refactor to OpenShiftAuthenticationProvider?
+            
+            OpenShiftGroupList groups = getOpenShiftGroups();
+
+            final Credential credential = new Credential(BearerToken.authorizationHeaderAccessMethod())
+                    .setAccessToken(getDefaultedClientSecret().getPlainText());
+            
+            HttpRequestFactory requestFactory = transport.createRequestFactory(new CredentialHttpRequestInitializer(credential));
+            GenericUrl url = new GenericUrl(getDefaultedServerPrefix() + USER_URI.substring(0, USER_URI.length()-1) +"/"+ usr);
+            
+            
+            try {
+                HttpRequest request = requestFactory.buildGetRequest(url);
+                com.google.api.client.http.HttpResponse response = request.execute();
+                LOGGER.log(Level.FINE, "Response msg: " + (response.getStatusMessage() == null ? "null" : response.getStatusMessage() ));
+                // LOGGER.log(Level.FINE, "Response content: " + (response.getContent() == null ? "null" : response.parseAsString() ));
+                usrInfo = response.parseAs(OpenShiftUserInfo.class);
+                LOGGER.log(Level.FINE, "OCP user credential: " + credential.toString());
+                LOGGER.log(Level.FINE, "OCP user response on URL: " + url.build());
+                LOGGER.log(Level.FINE, "OCP user response transport: " + transport.toString());
+                // LOGGER.log(Level.FINE, "OCP user response: " + response.parseAsString());
+                LOGGER.log(Level.FINE, "Loaded OCP user: " + usrInfo.getName());
+
+                
+            } catch (IOException e) {
+                LOGGER.log(Level.INFO, "Failed to get OCP user: ", e);
+            }
+        // }
+        // create a groups list for given user
+        
+        List<GrantedAuthority> userGroups = new ArrayList<>();
+        List<OpenShiftGroupInfo> grplist = groups.getGroups();
+        Iterator<OpenShiftGroupInfo> it = grplist.iterator();
+        OpenShiftGroupInfo info = null;
+        userGroups.add(SecurityRealm.AUTHENTICATED_AUTHORITY);
+        
+        while (it.hasNext()) {
+            info = it.next();
+
+            if(info.users.contains(username)) {
+                userGroups.add(new GrantedAuthorityImpl(info.getName()));
+                LOGGER.log(Level.FINE, "Added OCP user authority: " + info.getName() + " for user: " + username);
+            }
+        }
+        
+
+        LOGGER.fine("Loaded groups: " + userGroups.toString());
+
+        
+        return (UserDetails) new OpenShiftUserDetail(username, "", true, true, true, true,
+                userGroups.toArray(new GrantedAuthority[userGroups.size()]));
+    }
+    
+    // ELOS
+    private OpenShiftGroupList getOpenShiftGroups() {
+        
+        OpenShiftGroupList groups = null;
+
+        // TODO refactor into auth provider
+        final Credential credential = new Credential(BearerToken.authorizationHeaderAccessMethod())
+                    .setAccessToken(getDefaultedClientSecret().getPlainText());
+        HttpRequestFactory requestFactory = transport.createRequestFactory(new CredentialHttpRequestInitializer(credential));
+        GenericUrl url = new GenericUrl(getDefaultedServerPrefix() + GROUPS_URI);
+
+        try {
+            HttpRequest request = requestFactory.buildGetRequest(url);
+            groups = request.execute().parseAs(OpenShiftGroupList.class);
+        } catch (IOException e) {
+            LOGGER.log(Level.INFO, "Failed to get OCP user: ", e);
+        }
+        return groups;
+    }
+
+    
+    // ELOS
+    private String setOpenShiftGroups(final Credential credential, final HttpTransport transport)
+            throws IOException {
+            //      ELOS test groups call entry
+            // OpenShiftGroupsInfo        
+            HttpRequestFactory requestFactory = transport.createRequestFactory(new CredentialHttpRequestInitializer(credential));
+            GenericUrl url = new GenericUrl(getDefaultedServerPrefix() + GROUPS_URI);
+            HttpRequest request = requestFactory.buildGetRequest(url);
+            
+            OpenShiftGroupList groups = request.execute().parseAs(OpenShiftGroupList.class);
+            // this.ocpGroupList = groups;
+            String groupsString = request.execute().parseAsString();
+
+            // updateAuthorizationStrategyWithGroups(groups);
+            
+            if (LOGGER.isLoggable(FINE)) {
+                LOGGER.fine("Openshift Groups sync (RBO-304): setOpenShiftGroups:  " + groupsString);
+                List<OpenShiftGroupInfo> list = groups.getGroups();
+                Iterator<OpenShiftGroupInfo> it = list.iterator();
+                OpenShiftGroupInfo info = null;
+                while (it.hasNext()) {
+                    info = it.next();
+                    LOGGER.fine("ISSUE RBO2-78: setOpenShiftGroups: parsing list0 group name: " + info.getName());
+                    LOGGER.fine("ISSUE RBO2-78: setOpenShiftGroups: parsing list0 users: " + info.getUsers().toString());
+                }
+            }
+            return groups.getGroups().toString();
+    }
+
+    // ELOS
+    @Override
+    public GroupDetails loadGroupByGroupname(String groupname) throws UsernameNotFoundException, DataAccessException {
+        return loadGroupByGroupname(groupname, true);
+    }
+    
+    // ELOS
+    @Override
+    public GroupDetails loadGroupByGroupname(String groupname, boolean fetchMembers) throws UsernameNotFoundException, DataAccessException {
+        LOGGER.fine("ELOS: calling loadGroupByName: " + groupname);
+        OpenShiftGroupDetails groupDetails = null;
+        OpenShiftGroupInfo groupinfo = null;
+        // TODO Refactor OCP API access using Jenkins SA
+
+        final Credential credential = new Credential(BearerToken.authorizationHeaderAccessMethod())
+                .setAccessToken(getDefaultedClientSecret().getPlainText());
+        
+        HttpRequestFactory requestFactory = transport.createRequestFactory(new CredentialHttpRequestInitializer(credential));
+        GenericUrl url = new GenericUrl(getDefaultedServerPrefix() + GROUPS_URI + "/" + groupname);
+        HttpRequest request;
+        try {
+            request = requestFactory.buildGetRequest(url);
+            groupinfo = request.execute().parseAs(OpenShiftGroupInfo.class);
+        } catch (IOException e) {
+            // TODO Auto-generated catch block
+            LOGGER.fine("ELOS: problem calling loadGroupByName: " + e);
+        }
+        groupDetails = new OpenShiftGroupDetails(groupinfo.getName());
+        
+        if(fetchMembers) {
+            LOGGER.fine("ELOS: found groups: " + groupinfo.getUsers().toString());
+            Set<String> members = new HashSet<String>(groupinfo.getUsers());
+            // Set<String> members = new HashSet<String>();
+            groupDetails = new OpenShiftGroupDetails(groupDetails.getName(), members);
+        }
+        
+        LOGGER.fine("ELOS: found loadGroupByName: " + groupDetails.getName() + " " + groupDetails.getMembers().toString());
+        return groupDetails;
+    }
+
+    // ELOS
+    public void updateAuthorizationStrategyWithGroups(OpenShiftGroupList groupList) {
+
+        synchronized (USER_UPDATE_LOCK) {
+            GlobalMatrixAuthorizationStrategy existingAuthMgr = (GlobalMatrixAuthorizationStrategy) Jenkins
+                    .getInstance().getAuthorizationStrategy();
+            Set<String> usersGroups = existingAuthMgr.getGroups();
+    
+            List<PermissionGroup> permissionGroups = new ArrayList<PermissionGroup>(PermissionGroup.getAll());
+            if (LOGGER.isLoggable(Level.FINE))
+                LOGGER.fine(String.format("updateAuthorizationStrategy: permissions %s",
+                        permissionGroups.toString()));
+    
+            GlobalMatrixAuthorizationStrategy newAuthMgr = null;
+            if (existingAuthMgr instanceof ProjectMatrixAuthorizationStrategy) {
+                newAuthMgr = new ProjectMatrixAuthorizationStrategy();
+            } else {
+                newAuthMgr = new GlobalMatrixAuthorizationStrategy();
+            }
+    
+            if (newAuthMgr != null) {
+                for (String userGroup : usersGroups) {
+                    // copy any of the other users' permissions from the
+                    // prior auth mgr to our new one
+                    for (PermissionGroup pg : permissionGroups) {
+                        for (Permission p : pg.getPermissions()) {
+                            if (existingAuthMgr.hasPermission(userGroup, p)) {
+                                newAuthMgr.add(p, userGroup);
+                            }
+                        }
+                    }
+                    // ELOS inject OCP user groups
+                    Permission injPerm = Hudson.READ;
+                    
+                    
+                    List<OpenShiftGroupInfo> list = groupList.getGroups();
+                    Iterator<OpenShiftGroupInfo> it = list.iterator();
+                    OpenShiftGroupInfo grpInfo = null;
+                    while (it.hasNext()) {
+                        grpInfo = it.next();
+                        newAuthMgr.add(injPerm, grpInfo.getName());
+                    }
+                }
+    
+                Jenkins.getInstance().setAuthorizationStrategy(newAuthMgr);
+                try {
+                    Jenkins.getInstance().save();
+                } catch (Throwable t) {
+                    // see https://jenkins.io/blog/2018/03/15/jep-200-lts/#after-the-upgrade
+                    // running on 2.107 ... seen intermittent errors here, even after
+                    // marking transport transient (as the xml stuff does not use standard
+                    // serialization; switch from transient instance var to static var to
+                    // attempt to avoid xml marshalling;
+                    // Always logging for now, but will monitor and bracket with a FINE
+                    // logging level check if this becomes very verbose.
+                    LOGGER.log(INFO, "updateAuthorizationStrategy", t);
+                }
+            }
+        }
+    }
 
     private String buildSARJson(String namespace, String verb) throws IOException {
         OpenShiftSubjectAccessReviewRequest request = new OpenShiftSubjectAccessReviewRequest();
@@ -888,10 +1118,13 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
             throws IOException, GeneralSecurityException {
         populateDefaults();
         OpenShiftUserInfo info = getOpenShiftUserInfo(credential, transport);
+        UserDetails usrDetails = loadUserByUsername(info.getName());
         Map<String, List<Permission>> cfgedRolePermMap = getRoleToPermissionMap(transport);
         ArrayList<String> allowedRoles = postSAR(credential, transport);
-        GrantedAuthority[] authorities = new GrantedAuthority[] { SecurityRealm.AUTHENTICATED_AUTHORITY };
-
+        // GrantedAuthority[] authorities = new GrantedAuthority[] { SecurityRealm.AUTHENTICATED_AUTHORITY };
+        
+        // ELOS
+        GrantedAuthority[] authorities = usrDetails.getAuthorities();
         // we append the role suffix to the name stored into Jenkins, since a
         // given user is able to log in at varying scope/permission
         // levels in openshift; however, for now, we make sure the display name
@@ -1013,6 +1246,8 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
                         }
 
                         Jenkins.getInstance().setAuthorizationStrategy(newAuthMgr);
+                        // ELOS
+                        LOGGER.fine("ELOS:  newAuthMgr groups: " + newAuthMgr.getGroups().toString()); 
                         try {
                             Jenkins.getInstance().save();
                         } catch (Throwable t) {
