@@ -98,6 +98,8 @@ import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.util.SecurityUtils;
 import org.acegisecurity.userdetails.UserDetails;
 import org.acegisecurity.userdetails.UsernameNotFoundException;
+import org.jvnet.libpam.impl.CLibrary.group;
+
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import hudson.EnvVars;
 import hudson.Extension;
@@ -718,24 +720,27 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
         // create a groups list for given user
         
         List<GrantedAuthority> userGroups = new ArrayList<>();
-        List<OpenShiftGroupInfo> grplist = groups.getGroups();
-        Iterator<OpenShiftGroupInfo> it = grplist.iterator();
-        OpenShiftGroupInfo info = null;
         userGroups.add(SecurityRealm.AUTHENTICATED_AUTHORITY);
-        
-        while (it.hasNext()) {
-            info = it.next();
 
-            if(info.users.contains(username)) {
-                userGroups.add(new GrantedAuthorityImpl(info.getName()));
-                LOGGER.log(Level.FINE, "Added OCP user authority: " + info.getName() + " for user: " + username);
+        if (groups != null) {
+            List<OpenShiftGroupInfo> grplist = groups.getGroups();
+            Iterator<OpenShiftGroupInfo> it = grplist.iterator();
+            OpenShiftGroupInfo info = null;
+            
+            
+            while (it.hasNext()) {
+                info = it.next();
+
+                if(info.users.contains(username)) {
+                    userGroups.add(new GrantedAuthorityImpl(info.getName()));
+                    LOGGER.log(Level.FINE, "Added OCP user authority: " + info.getName() + " for user: " + username);
+                }
             }
+            
+
+            LOGGER.fine("Loaded groups: " + userGroups.toString());
+
         }
-        
-
-        LOGGER.fine("Loaded groups: " + userGroups.toString());
-
-        
         return (UserDetails) new OpenShiftUserDetail(username, "", true, true, true, true,
                 userGroups.toArray(new GrantedAuthority[userGroups.size()]));
     }
@@ -755,8 +760,9 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
             HttpRequest request = requestFactory.buildGetRequest(url);
             groups = request.execute().parseAs(OpenShiftGroupList.class);
         } catch (IOException e) {
-            LOGGER.log(Level.INFO, "Failed to get OCP user: ", e);
+            LOGGER.log(Level.FINE, "Failed to get OCP group (missing OCP API privilegies?): ", e);
         }
+        
         return groups;
     }
 
