@@ -677,6 +677,7 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
         return info;
     }
     // ELOS
+    // TODO refactor to use original usernames
     @Override
     public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException, DataAccessException {
         String usr;
@@ -697,7 +698,7 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
                     .setAccessToken(getDefaultedClientSecret().getPlainText());
             
             HttpRequestFactory requestFactory = transport.createRequestFactory(new CredentialHttpRequestInitializer(credential));
-            GenericUrl url = new GenericUrl(getDefaultedServerPrefix() + USER_URI.substring(0, USER_URI.length()-1) +"/"+ usr);
+            GenericUrl url = new GenericUrl(getDefaultedServerPrefix() + USER_URI.substring(0, USER_URI.length()-1) + usr);
             
             
             try {
@@ -715,6 +716,7 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
                 
             } catch (IOException e) {
                 LOGGER.log(Level.INFO, "Failed to get OCP user: ", e);
+                if (!usr.equalsIgnoreCase("kube:admin")) throw new UsernameNotFoundException("Failed to load user info.");
             }
         // }
         // create a groups list for given user
@@ -822,6 +824,7 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
         } catch (IOException e) {
             // TODO Auto-generated catch block
             LOGGER.fine("ELOS: problem calling loadGroupByName: " + e);
+            throw new UsernameNotFoundException("Failed to load group info.");
         }
         groupDetails = new OpenShiftGroupDetails(groupinfo.getName());
         
