@@ -712,6 +712,7 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
 
                 
             } catch (IOException e) {
+                //TODO better log and exception handling for missing OCP RBAC on usr/grp
                 LOGGER.log(Level.INFO, "Failed to get OCP user: ", e);
             }
         // }
@@ -725,7 +726,7 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
         
         while (it.hasNext()) {
             info = it.next();
-
+            // TODO userid ignore case
             if(info.users.contains(username)) {
                 userGroups.add(new GrantedAuthorityImpl(info.getName()));
                 LOGGER.log(Level.FINE, "Added OCP user authority: " + info.getName() + " for user: " + username);
