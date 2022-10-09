@@ -680,46 +680,38 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
     // TODO refactor to use original usernames
     @Override
     public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException, DataAccessException {
-        String usr;
+        String usr = normalizeUsername(username);
         OpenShiftUserInfo usrInfo = null;
 
-        // if (!username.endsWith("-view"))
-        //     throw new UsernameNotFoundException("Given principal name is a group, not an user.");
-        // else {
-            // user is OCP user with plugin suffix
-            // int idx = username.indexOf("-");
-            // usr = username.substring(0, idx);
-            usr = username;
-            // TODO refactor to OpenShiftAuthenticationProvider?
-            
-            OpenShiftGroupList groups = getOpenShiftGroups();
+        // TODO refactor to OpenShiftAuthenticationProvider?
+        
+        OpenShiftGroupList groups = getOpenShiftGroups();
 
-            final Credential credential = new Credential(BearerToken.authorizationHeaderAccessMethod())
-                    .setAccessToken(getDefaultedClientSecret().getPlainText());
-            
-            HttpRequestFactory requestFactory = transport.createRequestFactory(new CredentialHttpRequestInitializer(credential));
-            GenericUrl url = new GenericUrl(getDefaultedServerPrefix() + USER_URI.substring(0, USER_URI.length()-1) + usr);
-            
-            
-            try {
-                HttpRequest request = requestFactory.buildGetRequest(url);
-                com.google.api.client.http.HttpResponse response = request.execute();
-                LOGGER.log(Level.FINE, "Response msg: " + (response.getStatusMessage() == null ? "null" : response.getStatusMessage() ));
-                // LOGGER.log(Level.FINE, "Response content: " + (response.getContent() == null ? "null" : response.parseAsString() ));
-                usrInfo = response.parseAs(OpenShiftUserInfo.class);
-                LOGGER.log(Level.FINE, "OCP user credential: " + credential.toString());
-                LOGGER.log(Level.FINE, "OCP user response on URL: " + url.build());
-                LOGGER.log(Level.FINE, "OCP user response transport: " + transport.toString());
-                // LOGGER.log(Level.FINE, "OCP user response: " + response.parseAsString());
-                LOGGER.log(Level.FINE, "Loaded OCP user: " + usrInfo.getName());
+        final Credential credential = new Credential(BearerToken.authorizationHeaderAccessMethod())
+                .setAccessToken(getDefaultedClientSecret().getPlainText());
+        
+        HttpRequestFactory requestFactory = transport.createRequestFactory(new CredentialHttpRequestInitializer(credential));
+        GenericUrl url = new GenericUrl(getDefaultedServerPrefix() + USER_URI);
+        
+        
+        try {
+            HttpRequest request = requestFactory.buildGetRequest(url);
+            com.google.api.client.http.HttpResponse response = request.execute();
+            LOGGER.log(Level.FINE, "Response msg: " + (response.getStatusMessage() == null ? "null" : response.getStatusMessage() ));
+            // LOGGER.log(Level.FINE, "Response content: " + (response.getContent() == null ? "null" : response.parseAsString() ));
+            usrInfo = response.parseAs(OpenShiftUserInfo.class);
+            LOGGER.log(Level.FINE, "OCP user credential: " + credential.toString());
+            LOGGER.log(Level.FINE, "OCP user response on URL: " + url.build());
+            LOGGER.log(Level.FINE, "OCP user response transport: " + transport.toString());
+            // LOGGER.log(Level.FINE, "OCP user response: " + response.parseAsString());
+            LOGGER.log(Level.FINE, "Loaded OCP user: " + usrInfo.getName());
 
-                
-            } catch (IOException e) {
-                //TODO better log and exception handling for missing OCP RBAC on usr/grp
-                LOGGER.log(Level.INFO, "Failed to get OCP user: ", e);
-                if (!usr.equalsIgnoreCase("kube:admin")) throw new UsernameNotFoundException("Failed to load user info.");
-            }
-        // }
+            
+        } catch (IOException e) {
+            //TODO better log and exception handling for missing OCP RBAC on usr/grp
+            LOGGER.log(Level.INFO, "Failed to get OCP user: ", e);
+            if (!usr.equalsIgnoreCase("kube:admin")) throw new UsernameNotFoundException("Failed to load user info.");
+        }
         // create a groups list for given user
         
         List<GrantedAuthority> userGroups = new ArrayList<>();
@@ -731,16 +723,12 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
         while (it.hasNext()) {
             info = it.next();
             // TODO userid ignore case
-            if(info.users.contains(username)) {
+            if(info.users.contains(usr)) {
                 userGroups.add(new GrantedAuthorityImpl(info.getName()));
-                LOGGER.log(Level.FINE, "Added OCP user authority: " + info.getName() + " for user: " + username);
+                LOGGER.log(Level.FINE, "Added OCP user authority: " + info.getName() + " for user: " + username + "/" + usr);
             }
         }
-        
-
             LOGGER.fine("Loaded groups: " + userGroups.toString());
-
-        
         return (UserDetails) new OpenShiftUserDetail(username, "", true, true, true, true,
                 userGroups.toArray(new GrantedAuthority[userGroups.size()]));
     }
@@ -1459,6 +1447,16 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
             LOGGER.log(Level.INFO, "Failed to delete oAuthAccessToken", t);
         }
     }
+    // ELOS
+    // TODO utility function for username normalization
+    // TODO original username cant contain "-" character!!! 
+    private static String normalizeUsername(String usr) {
+        String username = usr.toLowerCase();
+        int idx = username.indexOf("-");
+        if(idx > 0) return username.substring(0,idx);
+        return username;
+    }
+
 
     @Extension
     public static final class DescriptorImpl extends Descriptor<SecurityRealm> {
