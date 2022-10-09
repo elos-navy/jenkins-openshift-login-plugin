@@ -729,7 +729,7 @@ public class OpenShiftOAuth2SecurityRealm extends SecurityRealm implements Seria
             }
         }
             LOGGER.fine("Loaded groups: " + userGroups.toString());
-        return (UserDetails) new OpenShiftUserDetail(username, "", true, true, true, true,
+        return (UserDetails) new OpenShiftUserDetail(usr, "", true, true, true, true,
                 userGroups.toArray(new GrantedAuthority[userGroups.size()]));
     }
     
